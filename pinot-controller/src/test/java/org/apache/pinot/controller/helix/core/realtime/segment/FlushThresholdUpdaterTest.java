@@ -18,27 +18,29 @@
  */
 package org.apache.pinot.controller.helix.core.realtime.segment;
 
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import org.apache.pinot.common.config.TableConfig;
+import org.apache.pinot.common.config.TableNameBuilder;
 import org.apache.pinot.common.metadata.segment.LLCRealtimeSegmentZKMetadata;
-import org.apache.pinot.common.partition.PartitionAssignment;
 import org.apache.pinot.common.utils.CommonConstants;
 import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.core.realtime.impl.fakestream.FakeStreamConfigUtils;
+import org.apache.pinot.core.realtime.stream.PartitionLevelStreamConfig;
 import org.apache.pinot.core.realtime.stream.StreamConfig;
 import org.apache.pinot.core.realtime.stream.StreamConfigProperties;
-import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
+import static org.testng.Assert.*;
+
 
 public class FlushThresholdUpdaterTest {
+  private static final String RAW_TABLE_NAME = "testTable";
+  private static final String REALTIME_TABLE_NAME = TableNameBuilder.REALTIME.tableNameWithType(RAW_TABLE_NAME);
   private static final long DESIRED_SEGMENT_SIZE = StreamConfig.getDefaultDesiredSegmentSizeBytes();
   private static final int DEFAULT_INITIAL_ROWS_THRESHOLD = StreamConfig.getDefaultFlushAutotuneInitialRows();
+
   private Random _random;
   private Map<String, double[][]> datasetGraph;
 
@@ -61,89 +63,6 @@ public class FlushThresholdUpdaterTest {
   }
 
   /**
-   * Tests that we have the right flush threshold set in the segment metadata given the various combinations of servers, partitions and replicas
-   */
-  @Test
-  public void testDefaultUpdateFlushThreshold() {
-
-    PartitionAssignment partitionAssignment = new PartitionAssignment("fakeTable_REALTIME");
-    // 4 partitions assigned to 4 servers, 4 replicas => the segments should have 250k rows each (1M / 4)
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      List<String> instances = new ArrayList<>();
-
-      for (int replicaId = 1; replicaId <= 4; ++replicaId) {
-        instances.add("Server_1.2.3.4_123" + replicaId);
-      }
-
-      partitionAssignment.addPartition(Integer.toString(segmentId), instances);
-    }
-
-    FlushThresholdUpdater flushThresholdUpdater = new DefaultFlushThresholdUpdater(1000000);
-    // Check that each segment has 250k rows each
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      LLCRealtimeSegmentZKMetadata metadata = new LLCRealtimeSegmentZKMetadata();
-      metadata.setSegmentName(makeFakeSegmentName(segmentId));
-      flushThresholdUpdater.updateFlushThreshold(metadata, null, null, partitionAssignment);
-      Assert.assertEquals(metadata.getSizeThresholdToFlushSegment(), 250000);
-    }
-
-    // 4 partitions assigned to 4 servers, 2 replicas, 2 partitions/server => the segments should have 500k rows each (1M / 2)
-    partitionAssignment.getPartitionToInstances().clear();
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      List<String> instances = new ArrayList<>();
-
-      for (int replicaId = 1; replicaId <= 2; ++replicaId) {
-        instances.add("Server_1.2.3.4_123" + ((replicaId + segmentId) % 4));
-      }
-
-      partitionAssignment.addPartition(Integer.toString(segmentId), instances);
-    }
-
-    // Check that each segment has 500k rows each
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      LLCRealtimeSegmentZKMetadata metadata = new LLCRealtimeSegmentZKMetadata();
-      metadata.setSegmentName(makeFakeSegmentName(segmentId));
-      flushThresholdUpdater.updateFlushThreshold(metadata, null, null, partitionAssignment);
-      Assert.assertEquals(metadata.getSizeThresholdToFlushSegment(), 500000);
-    }
-
-    // 4 partitions assigned to 4 servers, 1 replica, 1 partition/server => the segments should have 1M rows each (1M / 1)
-    partitionAssignment.getPartitionToInstances().clear();
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      List<String> instances = new ArrayList<>();
-      instances.add("Server_1.2.3.4_123" + segmentId);
-      partitionAssignment.addPartition(Integer.toString(segmentId), instances);
-    }
-
-    // Check that each segment has 1M rows each
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      LLCRealtimeSegmentZKMetadata metadata = new LLCRealtimeSegmentZKMetadata();
-      metadata.setSegmentName(makeFakeSegmentName(segmentId));
-      flushThresholdUpdater.updateFlushThreshold(metadata, null, null, partitionAssignment);
-      Assert.assertEquals(metadata.getSizeThresholdToFlushSegment(), 1000000);
-    }
-
-    // Assign another partition to all servers => the servers should have 500k rows each (1M / 2)
-    List<String> instances = new ArrayList<>();
-    for (int replicaId = 1; replicaId <= 4; ++replicaId) {
-      instances.add("Server_1.2.3.4_123" + replicaId);
-    }
-    partitionAssignment.addPartition("5", instances);
-
-    // Check that each segment has 500k rows each
-    for (int segmentId = 1; segmentId <= 4; ++segmentId) {
-      LLCRealtimeSegmentZKMetadata metadata = new LLCRealtimeSegmentZKMetadata();
-      metadata.setSegmentName(makeFakeSegmentName(segmentId));
-      flushThresholdUpdater.updateFlushThreshold(metadata, null, null, partitionAssignment);
-      Assert.assertEquals(metadata.getSizeThresholdToFlushSegment(), 500000);
-    }
-  }
-
-  private String makeFakeSegmentName(int id) {
-    return new LLCSegmentName("fakeTable_REALTIME", id, 0, 1234L).getSegmentName();
-  }
-
-  /**
    * Tests the segment size based flush threshold updater. A series of 500 runs is started.
    * We have 3 types of datasets, each having a different segment size to num rows ratio (exponential growth, logarithmic growth, steps)
    * We let 500 segments pass through our algorithm, each time feeding a segment size based on the graph.
@@ -151,10 +70,7 @@ public class FlushThresholdUpdaterTest {
    */
   @Test
   public void testSegmentSizeBasedFlushThreshold() {
-    String tableName = "aRealtimeTable_REALTIME";
-
     for (Map.Entry<String, double[][]> entry : datasetGraph.entrySet()) {
-
       SegmentSizeBasedFlushThresholdUpdater segmentSizeBasedFlushThresholdUpdater =
           new SegmentSizeBasedFlushThresholdUpdater(DESIRED_SEGMENT_SIZE, DEFAULT_INITIAL_ROWS_THRESHOLD);
 
@@ -181,14 +97,13 @@ public class FlushThresholdUpdaterTest {
       LLCRealtimeSegmentZKMetadata committingSegmentMetadata;
       LLCRealtimeSegmentZKMetadata newSegmentMetadata;
 
-      newSegmentMetadata = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
+      newSegmentMetadata = getNextSegmentMetadata(partitionId, seqNum++, startOffset, System.currentTimeMillis());
       committingSegmentDescriptor = new CommittingSegmentDescriptor(null, startOffset, segmentSizeBytes);
       segmentSizeBasedFlushThresholdUpdater
-          .updateFlushThreshold(newSegmentMetadata, null, committingSegmentDescriptor, null);
-      Assert.assertEquals(newSegmentMetadata.getSizeThresholdToFlushSegment(),
+          .updateFlushThreshold(newSegmentMetadata, committingSegmentDescriptor, null, 0);
+      assertEquals(newSegmentMetadata.getSizeThresholdToFlushSegment(),
           segmentSizeBasedFlushThresholdUpdater.getAutotuneInitialRows());
 
-      System.out.println("NumRowsThreshold, SegmentSize");
       for (int run = 0; run < numRuns; run++) {
         committingSegmentMetadata = new LLCRealtimeSegmentZKMetadata(newSegmentMetadata.toZNRecord());
 
@@ -199,17 +114,17 @@ public class FlushThresholdUpdaterTest {
         startOffset += 1000; // if stopped on time, increment less than 1000
         updateCommittingSegmentMetadata(committingSegmentMetadata, startOffset,
             committingSegmentMetadata.getSizeThresholdToFlushSegment());
-        newSegmentMetadata = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
+        newSegmentMetadata = getNextSegmentMetadata(partitionId, seqNum++, startOffset, System.currentTimeMillis());
         committingSegmentDescriptor =
             new CommittingSegmentDescriptor(committingSegmentMetadata.getSegmentName(), startOffset, segmentSizeBytes);
         segmentSizeBasedFlushThresholdUpdater
-            .updateFlushThreshold(newSegmentMetadata, committingSegmentMetadata, committingSegmentDescriptor, null);
+            .updateFlushThreshold(newSegmentMetadata, committingSegmentDescriptor, committingSegmentMetadata, 0);
 
         // Assert that segment size is in limits
         if (run > checkRunsAfter) {
-          Assert.assertTrue(segmentSizeBytes < (idealSegmentSize + segmentSizeSwivel),
+          assertTrue(segmentSizeBytes < (idealSegmentSize + segmentSizeSwivel),
               "Segment size check failed for dataset " + entry.getKey());
-          Assert.assertTrue(committingSegmentMetadata.getSizeThresholdToFlushSegment() > numRowsLowerLimit
+          assertTrue(committingSegmentMetadata.getSizeThresholdToFlushSegment() > numRowsLowerLimit
                   && committingSegmentMetadata.getSizeThresholdToFlushSegment() < numRowsUpperLimit,
               "Num rows check failed for dataset " + entry.getKey());
         }
@@ -236,18 +151,17 @@ public class FlushThresholdUpdaterTest {
     return (long) (segmentSize * 1024 * 1024);
   }
 
-  private LLCRealtimeSegmentZKMetadata getNextSegmentMetadata(String realtimeTableName, long startOffset,
-      int partitionId, int seqNum) {
-    LLCSegmentName newSegmentName =
-        new LLCSegmentName(realtimeTableName, partitionId, seqNum, System.currentTimeMillis());
-    LLCRealtimeSegmentZKMetadata newSegMetadata = new LLCRealtimeSegmentZKMetadata();
-    newSegMetadata.setCreationTime(System.currentTimeMillis());
-    newSegMetadata.setStartOffset(startOffset);
-    newSegMetadata.setEndOffset(Long.MAX_VALUE);
-    newSegMetadata.setNumReplicas(3);
-    newSegMetadata.setSegmentName(newSegmentName.getSegmentName());
-    newSegMetadata.setStatus(CommonConstants.Segment.Realtime.Status.IN_PROGRESS);
-    return newSegMetadata;
+  private LLCRealtimeSegmentZKMetadata getNextSegmentMetadata(int partitionId, int sequenceNumber, long startOffset,
+      long creationTimeMs) {
+    LLCRealtimeSegmentZKMetadata segmentZKMetadata = new LLCRealtimeSegmentZKMetadata();
+    segmentZKMetadata.setSegmentName(
+        new LLCSegmentName(RAW_TABLE_NAME, partitionId, sequenceNumber, creationTimeMs).getSegmentName());
+    segmentZKMetadata.setStartOffset(startOffset);
+    segmentZKMetadata.setEndOffset(Long.MAX_VALUE);
+    segmentZKMetadata.setCreationTime(creationTimeMs);
+    segmentZKMetadata.setNumReplicas(3);
+    segmentZKMetadata.setStatus(CommonConstants.Segment.Realtime.Status.IN_PROGRESS);
+    return segmentZKMetadata;
   }
 
   private void updateCommittingSegmentMetadata(LLCRealtimeSegmentZKMetadata committingSegmentMetadata, long endOffset,
@@ -264,85 +178,77 @@ public class FlushThresholdUpdaterTest {
    */
   @Test
   public void testFlushThresholdUpdater() {
-    FlushThresholdUpdateManager manager = new FlushThresholdUpdateManager();
-    TableConfig.Builder tableConfigBuilder = new TableConfig.Builder(CommonConstants.Helix.TableType.REALTIME);
-    tableConfigBuilder.setTableName("tableName_REALTIME");
-    TableConfig realtimeTableConfig;
-
-    FlushThresholdUpdater flushThresholdUpdater;
-    Map<String, String> streamConfigs = FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs().getStreamConfigsMap();
-    tableConfigBuilder.setStreamConfigs(streamConfigs);
+    FlushThresholdUpdateManager flushThresholdUpdateManager = new FlushThresholdUpdateManager();
+    Map<String, String> streamConfigMap = FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs().getStreamConfigsMap();
 
     // flush size set
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "10000");
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(flushThresholdUpdater.getClass(), DefaultFlushThresholdUpdater.class);
-    Assert.assertEquals(((DefaultFlushThresholdUpdater) flushThresholdUpdater).getTableFlushSize(), 10000);
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "10000");
+    FlushThresholdUpdater flushThresholdUpdater = flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof DefaultFlushThresholdUpdater);
+    assertEquals(((DefaultFlushThresholdUpdater) flushThresholdUpdater).getTableFlushSize(), 10000);
 
     // llc flush size set
-    streamConfigs.remove(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS);
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS + StreamConfigProperties.LLC_SUFFIX, "5000");
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(flushThresholdUpdater.getClass(), DefaultFlushThresholdUpdater.class);
-    Assert.assertEquals(((DefaultFlushThresholdUpdater) flushThresholdUpdater).getTableFlushSize(), 5000);
+    streamConfigMap.remove(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS);
+    streamConfigMap
+        .put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS + StreamConfigProperties.LLC_SUFFIX, "5000");
+    flushThresholdUpdater = flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof DefaultFlushThresholdUpdater);
+    assertEquals(((DefaultFlushThresholdUpdater) flushThresholdUpdater).getTableFlushSize(), 5000);
 
     // 0 flush size set
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS + StreamConfigProperties.LLC_SUFFIX, "0");
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(flushThresholdUpdater.getClass(), SegmentSizeBasedFlushThresholdUpdater.class);
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS + StreamConfigProperties.LLC_SUFFIX, "0");
+    flushThresholdUpdater = flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof SegmentSizeBasedFlushThresholdUpdater);
 
     // called again with 0 flush size - same object as above
-    streamConfigs.remove(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS + StreamConfigProperties.LLC_SUFFIX);
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
-    realtimeTableConfig = tableConfigBuilder.build();
-    FlushThresholdUpdater flushThresholdUpdaterSame = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(flushThresholdUpdaterSame.getClass(), SegmentSizeBasedFlushThresholdUpdater.class);
-    Assert.assertEquals(flushThresholdUpdater, flushThresholdUpdaterSame);
-    Assert.assertEquals(((SegmentSizeBasedFlushThresholdUpdater) (flushThresholdUpdater)).getDesiredSegmentSizeBytes(),
-        StreamConfig.getDefaultDesiredSegmentSizeBytes());
+    streamConfigMap.remove(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS + StreamConfigProperties.LLC_SUFFIX);
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
+    assertSame(flushThresholdUpdateManager
+            .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap)),
+        flushThresholdUpdater);
 
     // flush size reset to some number - default received, map cleared of segmentsize based
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "20000");
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(flushThresholdUpdater.getClass(), DefaultFlushThresholdUpdater.class);
-    Assert.assertEquals(((DefaultFlushThresholdUpdater) flushThresholdUpdater).getTableFlushSize(), 20000);
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "20000");
+    flushThresholdUpdater = flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof DefaultFlushThresholdUpdater);
+    assertEquals(((DefaultFlushThresholdUpdater) flushThresholdUpdater).getTableFlushSize(), 20000);
 
     // optimal segment size set to invalid value. Default remains the same.
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_DESIRED_SIZE, "Invalid");
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(flushThresholdUpdater.getClass(), SegmentSizeBasedFlushThresholdUpdater.class);
-    Assert.assertEquals(((SegmentSizeBasedFlushThresholdUpdater) (flushThresholdUpdater)).getDesiredSegmentSizeBytes(),
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_DESIRED_SIZE, "Invalid");
+    flushThresholdUpdater = flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof SegmentSizeBasedFlushThresholdUpdater);
+    assertEquals(((SegmentSizeBasedFlushThresholdUpdater) flushThresholdUpdater).getDesiredSegmentSizeBytes(),
         StreamConfig.getDefaultDesiredSegmentSizeBytes());
 
     // Clear the flush threshold updater for this table.
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "20000");
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "20000");
+    flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
 
     // optimal segment size set to 500M
     long desiredSegSize = 500 * 1024 * 1024;
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_DESIRED_SIZE, Long.toString(desiredSegSize));
-    realtimeTableConfig = tableConfigBuilder.build();
-    flushThresholdUpdater = manager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(((SegmentSizeBasedFlushThresholdUpdater) (flushThresholdUpdater)).getDesiredSegmentSizeBytes(),
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, "0");
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_DESIRED_SIZE, Long.toString(desiredSegSize));
+    flushThresholdUpdater = flushThresholdUpdateManager
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof SegmentSizeBasedFlushThresholdUpdater);
+    assertEquals(((SegmentSizeBasedFlushThresholdUpdater) flushThresholdUpdater).getDesiredSegmentSizeBytes(),
         desiredSegSize);
-    Assert.assertEquals(((SegmentSizeBasedFlushThresholdUpdater) (flushThresholdUpdater)).getAutotuneInitialRows(),
+    assertEquals(((SegmentSizeBasedFlushThresholdUpdater) flushThresholdUpdater).getAutotuneInitialRows(),
         DEFAULT_INITIAL_ROWS_THRESHOLD);
 
     // initial rows threshold
-    streamConfigs.put(StreamConfigProperties.SEGMENT_FLUSH_AUTOTUNE_INITIAL_ROWS, "500000");
-    realtimeTableConfig = tableConfigBuilder.build();
-    FlushThresholdUpdateManager newManager = new FlushThresholdUpdateManager();
-    flushThresholdUpdater = newManager.getFlushThresholdUpdater(realtimeTableConfig);
-    Assert.assertEquals(((SegmentSizeBasedFlushThresholdUpdater) (flushThresholdUpdater)).getAutotuneInitialRows(),
-        500_000);
+    streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_AUTOTUNE_INITIAL_ROWS, "500000");
+    flushThresholdUpdater = new FlushThresholdUpdateManager()
+        .getFlushThresholdUpdater(new PartitionLevelStreamConfig(REALTIME_TABLE_NAME, streamConfigMap));
+    assertTrue(flushThresholdUpdater instanceof SegmentSizeBasedFlushThresholdUpdater);
+    assertEquals(((SegmentSizeBasedFlushThresholdUpdater) flushThresholdUpdater).getAutotuneInitialRows(), 500_000);
   }
 
   /**
@@ -350,46 +256,35 @@ public class FlushThresholdUpdaterTest {
    */
   @Test
   public void testUpdaterChange() {
-    String tableName = "fakeTable_REALTIME";
     int tableFlushSize = 1_000_000;
     int partitionId = 0;
-    int seqNum = 0;
     long startOffset = 0;
-    long committingSegmentSizeBytes = 0;
-
-    PartitionAssignment partitionAssignment = new PartitionAssignment(tableName);
-    // 4 partitions assigned to 4 servers, 4 replicas => the segments should have 250k rows each (1M / 4)
-    for (int p = 0; p < 4; p++) {
-      List<String> instances = new ArrayList<>();
-
-      for (int replicaId = 0; replicaId < 4; replicaId++) {
-        instances.add("Server_1.2.3.4_123" + replicaId);
-      }
-
-      partitionAssignment.addPartition(Integer.toString(p), instances);
-    }
+    int maxNumPartitionsPerInstance = 4;
 
     // Initially we were using default flush threshold updation - verify that thresholds are as per default strategy
-    LLCRealtimeSegmentZKMetadata metadata0 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
+    LLCRealtimeSegmentZKMetadata metadata0 =
+        getNextSegmentMetadata(partitionId, 0, startOffset, System.currentTimeMillis());
 
     FlushThresholdUpdater flushThresholdUpdater = new DefaultFlushThresholdUpdater(tableFlushSize);
-    flushThresholdUpdater.updateFlushThreshold(metadata0, null, null, partitionAssignment);
+    flushThresholdUpdater.updateFlushThreshold(metadata0, null, null, maxNumPartitionsPerInstance);
 
-    Assert.assertEquals(metadata0.getSizeThresholdToFlushSegment(), 250_000);
-    Assert.assertNull(metadata0.getTimeThresholdToFlushSegment());
+    assertEquals(metadata0.getSizeThresholdToFlushSegment(), 250_000);
+    assertNull(metadata0.getTimeThresholdToFlushSegment());
 
     // before committing segment, we switched to size based updation - verify that new thresholds are set as per size based strategy
-    flushThresholdUpdater = new SegmentSizeBasedFlushThresholdUpdater(DESIRED_SEGMENT_SIZE,
-        DEFAULT_INITIAL_ROWS_THRESHOLD);
+    flushThresholdUpdater =
+        new SegmentSizeBasedFlushThresholdUpdater(DESIRED_SEGMENT_SIZE, DEFAULT_INITIAL_ROWS_THRESHOLD);
 
     startOffset += 1000;
     updateCommittingSegmentMetadata(metadata0, startOffset, 250_000);
-    committingSegmentSizeBytes = 180 * 1024 * 1024;
+    long committingSegmentSizeBytes = 180 * 1024 * 1024;
     CommittingSegmentDescriptor committingSegmentDescriptor =
         new CommittingSegmentDescriptor(metadata0.getSegmentName(), startOffset, committingSegmentSizeBytes);
-    LLCRealtimeSegmentZKMetadata metadata1 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
-    flushThresholdUpdater.updateFlushThreshold(metadata1, metadata0, committingSegmentDescriptor, partitionAssignment);
-    Assert.assertTrue(
+    LLCRealtimeSegmentZKMetadata metadata1 =
+        getNextSegmentMetadata(partitionId, 1, startOffset, System.currentTimeMillis());
+    flushThresholdUpdater
+        .updateFlushThreshold(metadata1, committingSegmentDescriptor, metadata0, maxNumPartitionsPerInstance);
+    assertTrue(
         metadata1.getSizeThresholdToFlushSegment() != 0 && metadata1.getSizeThresholdToFlushSegment() != 250_000);
 
     // before committing we switched back to default strategy, verify that thresholds are set according to default logic
@@ -400,29 +295,30 @@ public class FlushThresholdUpdaterTest {
     committingSegmentSizeBytes = 190 * 1024 * 1024;
     committingSegmentDescriptor =
         new CommittingSegmentDescriptor(metadata1.getSegmentName(), startOffset, committingSegmentSizeBytes);
-    LLCRealtimeSegmentZKMetadata metadata2 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
-    flushThresholdUpdater.updateFlushThreshold(metadata2, metadata1, committingSegmentDescriptor, partitionAssignment);
+    LLCRealtimeSegmentZKMetadata metadata2 =
+        getNextSegmentMetadata(partitionId, 2, startOffset, System.currentTimeMillis());
+    flushThresholdUpdater
+        .updateFlushThreshold(metadata2, committingSegmentDescriptor, metadata1, maxNumPartitionsPerInstance);
 
-    Assert.assertEquals(metadata2.getSizeThresholdToFlushSegment(), 250_000);
-    Assert.assertNull(metadata2.getTimeThresholdToFlushSegment());
+    assertEquals(metadata2.getSizeThresholdToFlushSegment(), 250_000);
+    assertNull(metadata2.getTimeThresholdToFlushSegment());
   }
 
   @Test
   public void testTimeThresholdInSegmentSizeBased() {
-    String tableName = "fakeTable_REALTIME";
     int partitionId = 0;
-    int seqNum = 0;
     long startOffset = 0;
     long committingSegmentSizeBytes;
     CommittingSegmentDescriptor committingSegmentDescriptor;
 
     // initial segment
-    LLCRealtimeSegmentZKMetadata metadata0 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
+    LLCRealtimeSegmentZKMetadata metadata0 =
+        getNextSegmentMetadata(partitionId, 0, startOffset, System.currentTimeMillis());
     SegmentSizeBasedFlushThresholdUpdater flushThresholdUpdater =
         new SegmentSizeBasedFlushThresholdUpdater(DESIRED_SEGMENT_SIZE, DEFAULT_INITIAL_ROWS_THRESHOLD);
     committingSegmentDescriptor = new CommittingSegmentDescriptor(metadata0.getSegmentName(), startOffset, 0);
-    flushThresholdUpdater.updateFlushThreshold(metadata0, null, committingSegmentDescriptor, null);
-    Assert.assertEquals(metadata0.getSizeThresholdToFlushSegment(), flushThresholdUpdater.getAutotuneInitialRows());
+    flushThresholdUpdater.updateFlushThreshold(metadata0, committingSegmentDescriptor, null, 0);
+    assertEquals(metadata0.getSizeThresholdToFlushSegment(), flushThresholdUpdater.getAutotuneInitialRows());
 
     // next segment hit time threshold
     startOffset += 1000;
@@ -430,9 +326,10 @@ public class FlushThresholdUpdaterTest {
     committingSegmentSizeBytes = 180 * 1024 * 1024;
     committingSegmentDescriptor =
         new CommittingSegmentDescriptor(metadata0.getSegmentName(), startOffset, committingSegmentSizeBytes);
-    LLCRealtimeSegmentZKMetadata metadata1 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
-    flushThresholdUpdater.updateFlushThreshold(metadata1, metadata0, committingSegmentDescriptor, null);
-    Assert.assertEquals(metadata1.getSizeThresholdToFlushSegment(),
+    LLCRealtimeSegmentZKMetadata metadata1 =
+        getNextSegmentMetadata(partitionId, 1, startOffset, System.currentTimeMillis());
+    flushThresholdUpdater.updateFlushThreshold(metadata1, committingSegmentDescriptor, metadata0, 0);
+    assertEquals(metadata1.getSizeThresholdToFlushSegment(),
         (int) (metadata0.getTotalRawDocs() * flushThresholdUpdater.getRowsMultiplierWhenTimeThresholdHit()));
 
     // now we hit rows threshold
@@ -441,57 +338,43 @@ public class FlushThresholdUpdaterTest {
     committingSegmentSizeBytes = 240 * 1024 * 1024;
     committingSegmentDescriptor =
         new CommittingSegmentDescriptor(metadata1.getSegmentName(), startOffset, committingSegmentSizeBytes);
-    LLCRealtimeSegmentZKMetadata metadata2 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
-    flushThresholdUpdater.updateFlushThreshold(metadata2, metadata1, committingSegmentDescriptor, null);
-    Assert.assertTrue(metadata2.getSizeThresholdToFlushSegment() != metadata1.getSizeThresholdToFlushSegment());
+    LLCRealtimeSegmentZKMetadata metadata2 =
+        getNextSegmentMetadata(partitionId, 2, startOffset, System.currentTimeMillis());
+    flushThresholdUpdater.updateFlushThreshold(metadata2, committingSegmentDescriptor, metadata1, 0);
+    assertTrue(metadata2.getSizeThresholdToFlushSegment() != metadata1.getSizeThresholdToFlushSegment());
   }
 
   @Test
   public void testMinThreshold() {
-    String tableName = "fakeTable_REALTIME";
-    final int partitionId = 0;
-    int seqNum = 0;
+    int partitionId = 0;
     long startOffset = 0;
-    long committingSegmentSizeBytes;
     CommittingSegmentDescriptor committingSegmentDescriptor;
     long now = System.currentTimeMillis();
     long seg0time = now - 1334_650;
     long seg1time = seg0time + 14_000;
-
-    // initial segment consumes only 15 rows, so next segment has 10k rows min.
-    LLCSegmentName seg0SegmentName = new LLCSegmentName(tableName, partitionId, seqNum, seg0time);
-    LLCRealtimeSegmentZKMetadata metadata0 = getNextSegmentMetadata(tableName, startOffset, partitionId, seqNum++);
-    metadata0.setSegmentName(seg0SegmentName.getSegmentName());
     SegmentSizeBasedFlushThresholdUpdater flushThresholdUpdater =
         new SegmentSizeBasedFlushThresholdUpdater(DESIRED_SEGMENT_SIZE, DEFAULT_INITIAL_ROWS_THRESHOLD);
-    committingSegmentDescriptor =
-        new CommittingSegmentDescriptor(seg0SegmentName.getSegmentName(), startOffset, 10_000);
+
+    // initial segment consumes only 15 rows, so next segment has 10k rows min.
+    LLCRealtimeSegmentZKMetadata metadata0 = getNextSegmentMetadata(partitionId, 0, startOffset, seg0time);
     metadata0.setTotalRawDocs(15);
-    metadata0.setCreationTime(seg0time);
     metadata0.setSizeThresholdToFlushSegment(874_990);
-    LLCSegmentName seg1SegmentName = new LLCSegmentName(tableName, partitionId, seqNum + 1, seg1time);
-    LLCRealtimeSegmentZKMetadata metadata1 = new LLCRealtimeSegmentZKMetadata();
-    metadata1.setSegmentName(seg1SegmentName.getSegmentName());
-    metadata1.setCreationTime(seg1time);
-    flushThresholdUpdater.updateFlushThreshold(metadata1, metadata0, committingSegmentDescriptor, null);
-    Assert.assertEquals(metadata1.getSizeThresholdToFlushSegment(), flushThresholdUpdater.getMinimumNumRowsThreshold());
+    committingSegmentDescriptor = new CommittingSegmentDescriptor(metadata0.getSegmentName(), startOffset, 10_000);
+    LLCRealtimeSegmentZKMetadata metadata1 = getNextSegmentMetadata(partitionId, 1, startOffset, seg1time);
+    flushThresholdUpdater.updateFlushThreshold(metadata1, committingSegmentDescriptor, metadata0, 0);
+    assertEquals(metadata1.getSizeThresholdToFlushSegment(), flushThresholdUpdater.getMinimumNumRowsThreshold());
 
     // seg1 also consumes 20 rows, so seg2 also gets 10k as threshold.
-    LLCSegmentName seg2SegmentName = new LLCSegmentName(tableName, partitionId, seqNum + 2, now);
-    LLCRealtimeSegmentZKMetadata metadata2 = new LLCRealtimeSegmentZKMetadata();
-    metadata2.setSegmentName(seg2SegmentName.getSegmentName());
-    metadata2.setStartTime(now);
+    LLCRealtimeSegmentZKMetadata metadata2 = getNextSegmentMetadata(partitionId, 2, startOffset, now);
     committingSegmentDescriptor =
-        new CommittingSegmentDescriptor(seg1SegmentName.getSegmentName(), startOffset + 1000, 14_000);
+        new CommittingSegmentDescriptor(metadata1.getSegmentName(), startOffset + 1000, 14_000);
     metadata1.setTotalRawDocs(25);
-    flushThresholdUpdater.updateFlushThreshold(metadata2, metadata1, committingSegmentDescriptor, null);
-    Assert.assertEquals(metadata2.getSizeThresholdToFlushSegment(), flushThresholdUpdater.getMinimumNumRowsThreshold());
+    flushThresholdUpdater.updateFlushThreshold(metadata2, committingSegmentDescriptor, metadata1, 0);
+    assertEquals(metadata2.getSizeThresholdToFlushSegment(), flushThresholdUpdater.getMinimumNumRowsThreshold());
   }
 
   @Test
   public void testNonZeroPartitionUpdates() {
-    String tableName = "fakeTable_REALTIME";
-    int seqNum = 0;
     long startOffset = 0;
     CommittingSegmentDescriptor committingSegmentDescriptor;
     long now = System.currentTimeMillis();
@@ -501,39 +384,28 @@ public class FlushThresholdUpdaterTest {
         new SegmentSizeBasedFlushThresholdUpdater(DESIRED_SEGMENT_SIZE, DEFAULT_INITIAL_ROWS_THRESHOLD);
 
     // Initial update is from partition 1
-    LLCSegmentName seg0SegmentName = new LLCSegmentName(tableName, 1, seqNum, seg0time);
-    LLCRealtimeSegmentZKMetadata metadata0 = getNextSegmentMetadata(tableName, startOffset, 1, seqNum++);
-    metadata0.setSegmentName(seg0SegmentName.getSegmentName());
-    committingSegmentDescriptor =
-        new CommittingSegmentDescriptor(seg0SegmentName.getSegmentName(), startOffset, 3_110_000);
+    LLCRealtimeSegmentZKMetadata metadata0 = getNextSegmentMetadata(1, 0, startOffset, seg0time);
     metadata0.setTotalRawDocs(1_234_000);
-    metadata0.setCreationTime(seg0time);
     metadata0.setSizeThresholdToFlushSegment(874_990);
-    LLCSegmentName seg1SegmentName = new LLCSegmentName(tableName, 1, seqNum + 1, seg1time);
-    LLCRealtimeSegmentZKMetadata metadata1 = new LLCRealtimeSegmentZKMetadata();
-    metadata1.setSegmentName(seg1SegmentName.getSegmentName());
-    metadata1.setCreationTime(seg1time);
-    Assert.assertEquals(flushThresholdUpdater.getLatestSegmentRowsToSizeRatio(), 0.0);
-    flushThresholdUpdater.updateFlushThreshold(metadata1, metadata0, committingSegmentDescriptor, null);
-    final double currentRatio = flushThresholdUpdater.getLatestSegmentRowsToSizeRatio();
-    Assert.assertTrue(currentRatio > 0.0);
+    committingSegmentDescriptor = new CommittingSegmentDescriptor(metadata0.getSegmentName(), startOffset, 3_110_000);
+    LLCRealtimeSegmentZKMetadata metadata1 = getNextSegmentMetadata(1, 1, startOffset, seg1time);
+    assertEquals(flushThresholdUpdater.getLatestSegmentRowsToSizeRatio(), 0.0);
+    flushThresholdUpdater.updateFlushThreshold(metadata1, committingSegmentDescriptor, metadata0, 0);
+    double currentRatio = flushThresholdUpdater.getLatestSegmentRowsToSizeRatio();
+    assertTrue(currentRatio > 0.0);
 
     // Next segment update from partition 1 does not change the ratio.
-
-    LLCSegmentName seg2SegmentName = new LLCSegmentName(tableName, 1, seqNum + 2, now);
-    LLCRealtimeSegmentZKMetadata metadata2 = new LLCRealtimeSegmentZKMetadata();
-    metadata2.setSegmentName(seg2SegmentName.getSegmentName());
-    metadata2.setStartTime(now);
+    LLCRealtimeSegmentZKMetadata metadata2 = getNextSegmentMetadata(1, 2, startOffset, now);
     committingSegmentDescriptor =
-        new CommittingSegmentDescriptor(seg1SegmentName.getSegmentName(), startOffset + 1000, 256_000_000);
+        new CommittingSegmentDescriptor(metadata1.getSegmentName(), startOffset + 1000, 256_000_000);
     metadata1.setTotalRawDocs(2_980_880);
-    flushThresholdUpdater.updateFlushThreshold(metadata2, metadata1, committingSegmentDescriptor, null);
-    Assert.assertEquals(flushThresholdUpdater.getLatestSegmentRowsToSizeRatio(), currentRatio);
+    flushThresholdUpdater.updateFlushThreshold(metadata2, committingSegmentDescriptor, metadata1, 0);
+    assertEquals(flushThresholdUpdater.getLatestSegmentRowsToSizeRatio(), currentRatio);
 
     // But if seg1 is from partition 0, the ratio is changed.
-    seg1SegmentName = new LLCSegmentName(tableName, 0, seqNum + 1, seg1time);
-    metadata1.setSegmentName(seg1SegmentName.getSegmentName());
-    flushThresholdUpdater.updateFlushThreshold(metadata2, metadata1, committingSegmentDescriptor, null);
-    Assert.assertTrue(flushThresholdUpdater.getLatestSegmentRowsToSizeRatio() != currentRatio);
+    metadata1 = getNextSegmentMetadata(0, 1, startOffset, seg1time);
+    committingSegmentDescriptor.setSegmentName(metadata1.getSegmentName());
+    flushThresholdUpdater.updateFlushThreshold(metadata2, committingSegmentDescriptor, metadata1, 0);
+    assertNotEquals(flushThresholdUpdater.getLatestSegmentRowsToSizeRatio(), currentRatio);
   }
 }

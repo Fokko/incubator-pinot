@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.apache.pinot.common.config.TableConfig;
 import org.apache.pinot.common.utils.DataSize;
 import org.apache.pinot.common.utils.EqualityUtils;
 import org.apache.pinot.common.utils.time.TimeUtils;
@@ -77,11 +78,14 @@ public class StreamConfig {
 
   final private Map<String, String> _streamConfigMap = new HashMap<>();
 
+  public StreamConfig(TableConfig tableConfig) {
+    this(tableConfig.getTableName(), tableConfig.getIndexingConfig().getStreamConfigs());
+  }
+
   /**
    * Initializes a StreamConfig using the map of stream configs from the table config
    */
   public StreamConfig(String tableNameWithType, Map<String, String> streamConfigMap) {
-
     _type = streamConfigMap.get(StreamConfigProperties.STREAM_TYPE);
     Preconditions.checkNotNull(_type, "Stream type cannot be null");
 
@@ -161,36 +165,8 @@ public class StreamConfig {
     }
     _fetchTimeoutMillis = fetchTimeoutMillis;
 
-    int flushThresholdRows = DEFAULT_FLUSH_THRESHOLD_ROWS;
-    String flushThresholdRowsValue = streamConfigMap.get(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS);
-    if (flushThresholdRowsValue != null) {
-      try {
-        flushThresholdRows = Integer.parseInt(flushThresholdRowsValue);
-      } catch (Exception e) {
-        LOGGER.warn("Caught exception when parsing flush threshold rows {}:{}, defaulting to {}",
-            StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, flushThresholdRowsValue, DEFAULT_FLUSH_THRESHOLD_ROWS,
-            e);
-      }
-    }
-    _flushThresholdRows = flushThresholdRows;
-
-    long flushThresholdTime = DEFAULT_FLUSH_THRESHOLD_TIME;
-    String flushThresholdTimeValue = streamConfigMap.get(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_TIME);
-    if (flushThresholdTimeValue != null) {
-      try {
-        flushThresholdTime = TimeUtils.convertPeriodToMillis(flushThresholdTimeValue);
-      } catch (Exception e) {
-        try {
-          // For backward compatibility, default is using milliseconds value.
-          flushThresholdTime = Long.parseLong(flushThresholdTimeValue);
-        } catch (Exception e1) {
-          LOGGER.warn("Caught exception when converting flush threshold period to millis {}:{}, defaulting to {}",
-              StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_TIME, flushThresholdTimeValue,
-              DEFAULT_FLUSH_THRESHOLD_TIME, e);
-        }
-      }
-    }
-    _flushThresholdTimeMillis = flushThresholdTime;
+    _flushThresholdRows = extractFlushThresholdRows(streamConfigMap);
+    _flushThresholdTimeMillis = extractFlushThresholdTimeMillis(streamConfigMap);
 
     long flushDesiredSize = -1;
     String flushSegmentDesiredSizeValue = streamConfigMap.get(StreamConfigProperties.SEGMENT_FLUSH_DESIRED_SIZE);
@@ -220,6 +196,44 @@ public class StreamConfig {
     _groupId = streamConfigMap.get(groupIdKey);
 
     _streamConfigMap.putAll(streamConfigMap);
+  }
+
+  protected int extractFlushThresholdRows(Map<String, String> streamConfigMap) {
+    String flushThresholdRowsStr = streamConfigMap.get(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS);
+    if (flushThresholdRowsStr != null) {
+      try {
+        int flushThresholdRows = Integer.parseInt(flushThresholdRowsStr);
+        // Flush threshold rows 0 means using segment size based flush threshold
+        Preconditions.checkState(flushThresholdRows >= 0);
+        return flushThresholdRows;
+      } catch (Exception e) {
+        LOGGER.warn("Invalid config {}: {}, defaulting to: {}", StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS,
+            flushThresholdRowsStr, DEFAULT_FLUSH_THRESHOLD_ROWS);
+        return DEFAULT_FLUSH_THRESHOLD_ROWS;
+      }
+    } else {
+      return DEFAULT_FLUSH_THRESHOLD_ROWS;
+    }
+  }
+
+  protected long extractFlushThresholdTimeMillis(Map<String, String> streamConfigMap) {
+    String flushThresholdTimeStr = streamConfigMap.get(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_TIME);
+    if (flushThresholdTimeStr != null) {
+      try {
+        return TimeUtils.convertPeriodToMillis(flushThresholdTimeStr);
+      } catch (Exception e) {
+        try {
+          // For backward-compatibility, parse it as milliseconds value
+          return Long.parseLong(flushThresholdTimeStr);
+        } catch (NumberFormatException nfe) {
+          LOGGER.warn("Invalid config {}: {}, defaulting to: {}", StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_TIME,
+              flushThresholdTimeStr, DEFAULT_FLUSH_THRESHOLD_TIME);
+          return DEFAULT_FLUSH_THRESHOLD_TIME;
+        }
+      }
+    } else {
+      return DEFAULT_FLUSH_THRESHOLD_TIME;
+    }
   }
 
   public String getType() {
@@ -321,9 +335,9 @@ public class StreamConfig {
         + _offsetCriteria + '\'' + ", _connectionTimeoutMillis=" + _connectionTimeoutMillis + ", _fetchTimeoutMillis="
         + _fetchTimeoutMillis + ", _flushThresholdRows=" + _flushThresholdRows + ", _flushThresholdTimeMillis="
         + _flushThresholdTimeMillis + ", _flushSegmentDesiredSizeBytes=" + _flushSegmentDesiredSizeBytes
-        + ", _flushAutotuneInitialRows=" + _flushAutotuneInitialRows + ", _decoderClass='" + _decoderClass
-        + '\'' + ", _decoderProperties=" + _decoderProperties + ", _groupId='" + _groupId
-        + ", _tableNameWithType='" + _tableNameWithType + '}';
+        + ", _flushAutotuneInitialRows=" + _flushAutotuneInitialRows + ", _decoderClass='" + _decoderClass + '\''
+        + ", _decoderProperties=" + _decoderProperties + ", _groupId='" + _groupId + ", _tableNameWithType='"
+        + _tableNameWithType + '}';
   }
 
   @Override
@@ -343,8 +357,8 @@ public class StreamConfig {
         .isEqual(_flushThresholdRows, that._flushThresholdRows) && EqualityUtils
         .isEqual(_flushThresholdTimeMillis, that._flushThresholdTimeMillis) && EqualityUtils
         .isEqual(_flushSegmentDesiredSizeBytes, that._flushSegmentDesiredSizeBytes) && EqualityUtils
-        .isEqual(_flushAutotuneInitialRows, that._flushAutotuneInitialRows) && EqualityUtils
-        .isEqual(_type, that._type) && EqualityUtils.isEqual(_topicName, that._topicName) && EqualityUtils
+        .isEqual(_flushAutotuneInitialRows, that._flushAutotuneInitialRows) && EqualityUtils.isEqual(_type, that._type)
+        && EqualityUtils.isEqual(_topicName, that._topicName) && EqualityUtils
         .isEqual(_consumerTypes, that._consumerTypes) && EqualityUtils
         .isEqual(_consumerFactoryClassName, that._consumerFactoryClassName) && EqualityUtils
         .isEqual(_offsetCriteria, that._offsetCriteria) && EqualityUtils.isEqual(_decoderClass, that._decoderClass)

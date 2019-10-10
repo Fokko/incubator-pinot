@@ -1072,7 +1072,7 @@ public class PinotHelixResourceManager {
          * We also need to support the case when a high-level consumer already exists for a table and we are adding
          * the low-level consumers.
          */
-        ensureRealtimeClusterIsSetUp(tableConfig, tableNameWithType, indexingConfig);
+        ensureRealtimeClusterIsSetUp(tableConfig);
 
         // Assign instances
         assignInstances(tableConfig, true);
@@ -1161,27 +1161,31 @@ public class PinotHelixResourceManager {
     }
   }
 
-  private void ensureRealtimeClusterIsSetUp(TableConfig config, String realtimeTableName,
-      IndexingConfig indexingConfig) {
-    StreamConfig streamConfig = new StreamConfig(realtimeTableName, indexingConfig.getStreamConfigs());
-    IdealState idealState = _helixAdmin.getResourceIdealState(_helixClusterName, realtimeTableName);
+  private void ensureRealtimeClusterIsSetUp(TableConfig realtimeTableConfig) {
+    String realtimeTableName = realtimeTableConfig.getTableName();
+    IdealState idealState = getTableIdealState(realtimeTableName);
+    // Skip processing disabled IdealState
+    if (idealState != null && !idealState.isEnabled()) {
+      return;
+    }
+
+    StreamConfig streamConfig = new StreamConfig(realtimeTableConfig);
 
     if (streamConfig.hasHighLevelConsumerType()) {
-      if (streamConfig.hasLowLevelConsumerType()) {
-        // We may be adding on low-level, or creating both.
-        if (idealState == null) {
-          // Need to create both. Create high-level consumer first.
-          createHelixEntriesForHighLevelConsumer(config, realtimeTableName, idealState);
-          idealState = _helixAdmin.getResourceIdealState(_helixClusterName, realtimeTableName);
-          LOGGER.info("Configured new HLC for table {}", realtimeTableName);
-        }
-        // Fall through to create low-level consumers
+      if (idealState == null) {
+        LOGGER.info("Initializing IdealState for HLC table: {}", realtimeTableName);
+        idealState = PinotTableIdealStateBuilder
+            .buildInitialHighLevelRealtimeIdealStateFor(realtimeTableName, realtimeTableConfig, _helixZkManager,
+                _propertyStore, _enableBatchMessageMode);
+        _helixAdmin.addResource(_helixClusterName, realtimeTableName, idealState);
       } else {
-        // Only high-level consumer specified in the config.
-        createHelixEntriesForHighLevelConsumer(config, realtimeTableName, idealState);
-        // Clean up any LLC table if they are present
-        _pinotLLCRealtimeSegmentManager.cleanupLLC(realtimeTableName);
+        // Remove LLC segments if it is not configured
+        if (!streamConfig.hasLowLevelConsumerType()) {
+          _pinotLLCRealtimeSegmentManager.removeLLCSegments(idealState);
+        }
       }
+      // For HLC table, property store entry must exist to trigger watchers to create segments
+      ensurePropertyStoreEntryExistsForHighLevelConsumer(realtimeTableName);
     }
 
     // Either we have only low-level consumer, or both.
@@ -1190,8 +1194,8 @@ public class PinotHelixResourceManager {
       // (unless there are low-level segments already present)
       if (ZKMetadataProvider.getLLCRealtimeSegments(_propertyStore, realtimeTableName).isEmpty()) {
         PinotTableIdealStateBuilder
-            .buildLowLevelRealtimeIdealStateFor(_pinotLLCRealtimeSegmentManager, realtimeTableName, config, idealState,
-                _enableBatchMessageMode);
+            .buildLowLevelRealtimeIdealStateFor(_pinotLLCRealtimeSegmentManager, realtimeTableName, realtimeTableConfig,
+                idealState, _enableBatchMessageMode);
         LOGGER.info("Successfully added Helix entries for low-level consumers for {} ", realtimeTableName);
       } else {
         LOGGER.info("LLC is already set up for table {}, not configuring again", realtimeTableName);
@@ -1199,23 +1203,11 @@ public class PinotHelixResourceManager {
     }
   }
 
-  private void createHelixEntriesForHighLevelConsumer(TableConfig config, String realtimeTableName,
-      IdealState idealState) {
-    if (idealState == null) {
-      idealState = PinotTableIdealStateBuilder
-          .buildInitialHighLevelRealtimeIdealStateFor(realtimeTableName, config, _helixZkManager, _propertyStore,
-              _enableBatchMessageMode);
-      LOGGER.info("Adding helix resource with empty HLC IdealState for {}", realtimeTableName);
-      _helixAdmin.addResource(_helixClusterName, realtimeTableName, idealState);
-    } else {
-      // TODO jfim: We get in this block if we're trying to add a HLC or it already exists. If it doesn't already exist, we need to set instance configs properly (which is done in buildInitialHighLevelRealtimeIdealState, surprisingly enough). For now, do nothing.
-      LOGGER.info("Not reconfiguring HLC for table {}", realtimeTableName);
-    }
-    LOGGER.info("Successfully created empty ideal state for  high level consumer for {} ", realtimeTableName);
-    // Finally, create the propertystore entry that will trigger watchers to create segments
-    String tablePropertyStorePath = ZKMetadataProvider.constructPropertyStorePathForResource(realtimeTableName);
-    if (!_propertyStore.exists(tablePropertyStorePath, AccessOption.PERSISTENT)) {
-      _propertyStore.create(tablePropertyStorePath, new ZNRecord(realtimeTableName), AccessOption.PERSISTENT);
+  private void ensurePropertyStoreEntryExistsForHighLevelConsumer(String realtimeTableName) {
+    String propertyStorePath = ZKMetadataProvider.constructPropertyStorePathForResource(realtimeTableName);
+    if (!_propertyStore.exists(propertyStorePath, AccessOption.PERSISTENT)) {
+      LOGGER.info("Creating property store entry for LLC table: {}", realtimeTableName);
+      _propertyStore.create(propertyStorePath, new ZNRecord(realtimeTableName), AccessOption.PERSISTENT);
     }
   }
 
@@ -1290,7 +1282,7 @@ public class PinotHelixResourceManager {
         IndexingConfig indexingConfig = tableConfig.getIndexingConfig();
         verifyIndexingConfig(tableNameWithType, indexingConfig);
         ZKMetadataProvider.setRealtimeTableConfig(_propertyStore, tableNameWithType, tableConfig.toZNRecord());
-        ensureRealtimeClusterIsSetUp(tableConfig, tableNameWithType, indexingConfig);
+        ensureRealtimeClusterIsSetUp(tableConfig);
 
         // Assign instances
         assignInstances(tableConfig, false);
@@ -1334,12 +1326,6 @@ public class PinotHelixResourceManager {
     }
     tableConfig.setIndexingConfig(newConfigs);
     setExistingTableConfig(tableConfig);
-
-    if (type == TableType.REALTIME) {
-      // Check if HLC table is allowed
-      verifyIndexingConfig(tableNameWithType, newConfigs);
-      ensureRealtimeClusterIsSetUp(tableConfig, tableName, newConfigs);
-    }
   }
 
   private void handleBrokerResource(@Nonnull final String tableName, @Nonnull final List<String> brokersForTenant) {
